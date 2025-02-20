@@ -6,7 +6,7 @@ Le programme utilise Gurobi Optimizer pour trouver la meilleure solution possibl
 
 1️⃣ Cloner le projet depuis GitHub
 
-git clone https://github.com/WilliamBBB/Projet_William.git
+git clone https://github.com/WilliamBBB/Hcode_BER.git
 cd Projet_William
 
 2️⃣ Installer les dépendances
