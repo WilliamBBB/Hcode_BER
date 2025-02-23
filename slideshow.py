@@ -1,115 +1,154 @@
 import sys
-import gurobipy as gp
-from gurobipy import GRB
-
-def read_input(file_path):
-    with open(file_path, "r") as f:
+import os
+from gurobipy import Model, GRB, quicksum
+from itertools import combinations
+ 
+# ---- Lecture du fichier ----
+def read_dataset(filename):
+    with open(filename, "r") as f:
         lines = f.readlines()
     
-    N = int(lines[0].strip())
-    photos = []
-    vertical_photos = []
-    horizontal_photos = []
-    
+    N = int(lines[0].strip())  # Nombre de photos
+    photos = {}
+    verticals = []
+ 
     for i in range(1, N + 1):
-        parts = lines[i].strip().split()
-        orientation = parts[0]
-        tags = set(parts[2:])
-        photos.append((i - 1, orientation, tags))
-        
-        if orientation == "H":
-            horizontal_photos.append((i - 1, tags))
-        else:
-            vertical_photos.append((i - 1, tags))
+        data = lines[i].strip().split()
+        orientation = data[0]
+        tags = set(data[2:])
+        photos[i - 1] = {"orientation": orientation, "tags": tags}
+        if orientation == "V":
+            verticals.append(i - 1)
+ 
+    return photos, verticals
+ 
+# ---- Création des diapositives possibles ----
+def create_slides(photos, verticals):
+    slides = []
     
-    return photos, horizontal_photos, vertical_photos
-
-def merge_vertical_photos(vertical_photos):
-    merged_slides = []
-    used = set()
+    # Ajouter les photos horizontales comme slides individuels
+    for pid, photo in photos.items():
+        if photo["orientation"] == "H":
+            slides.append((pid,))
+ 
+    # Générer toutes les combinaisons possibles de paires de photos verticales
+    vertical_pairs = list(combinations(verticals, 2))
     
-    for i in range(len(vertical_photos)):
-        if i in used:
-            continue
-        best_match = None
-        max_tags = 0
-        for j in range(i + 1, len(vertical_photos)):
-            if j in used:
-                continue
-            merged_tags = vertical_photos[i][1] | vertical_photos[j][1]
-            if len(merged_tags) > max_tags:
-                max_tags = len(merged_tags)
-                best_match = j
-        
-        if best_match is not None:
-            merged_slides.append(((vertical_photos[i][0], vertical_photos[best_match][0]), merged_tags))
-            used.add(i)
-            used.add(best_match)
-    
-    return merged_slides
-
-def compute_interest(tags1, tags2):
-    common = len(tags1 & tags2)
-    unique1 = len(tags1 - tags2)
-    unique2 = len(tags2 - tags1)
-    return min(common, unique1, unique2)
-
-def solve_slideshow(file_path):
-    photos, horizontal_photos, vertical_photos = read_input(file_path)
-    vertical_slides = merge_vertical_photos(vertical_photos)
-    slides = [(h[0], h[1]) for h in horizontal_photos] + vertical_slides
-    
-    # Gurobi model
-    model = gp.Model("slideshow")
-    
-    # Variables : x[i, j] = 1 si la diapositive i est placée avant la diapositive j
-    slide_indices = list(range(len(slides)))
-    x = model.addVars(slide_indices, slide_indices, vtype=GRB.BINARY, name="x")
-    
-    # Contrainte : chaque diapositive doit être suivie par exactement une autre
-    for i in slide_indices:
-        model.addConstr(sum(x[i, j] for j in slide_indices if i != j) == 1)
-    
-    # Contrainte : chaque diapositive doit avoir exactement une prédécesseur
-    for j in slide_indices:
-        model.addConstr(sum(x[i, j] for i in slide_indices if i != j) == 1)
-    
-    # Fonction objectif : maximiser la somme des scores des transitions
-    model.setObjective(
-        gp.quicksum(compute_interest(slides[i][1], slides[j][1]) * x[i, j] 
-                    for i in slide_indices for j in slide_indices if i != j), 
-        GRB.MAXIMIZE)
-    
+    # Ajouter toutes les paires possibles à la liste des slides
+    slides.extend(vertical_pairs)
+ 
+    return slides
+ 
+# ---- Calcul du score de transition ----
+def interest_factor(tags1, tags2):
+    return min(len(tags1 & tags2), len(tags1 - tags2), len(tags2 - tags1))
+ 
+# ---- Optimisation avec Gurobi ----
+def optimize_slideshow(photos, slides):
+    model = Model("Slideshow Optimization")
+ 
+    print("\n🚀 Lancement de l'optimisation Gurobi...")
+ 
+    # Séparer les slides horizontaux et verticaux
+    horizontal_slides = [s for s in slides if len(s) == 1]
+    vertical_slides = [s for s in slides if len(s) == 2]
+ 
+    # Variables de sélection des diapositives
+    x = model.addVars(slides, vtype=GRB.BINARY, name="x")
+ 
+    # Variables de transition entre diapositives
+    slide_tags = {s: set().union(*[photos[p]["tags"] for p in s]) for s in slides}
+    slide_pairs = [(s1, s2) for s1 in slides for s2 in slides if s1 != s2]
+    transition_scores = {(s1, s2): interest_factor(slide_tags[s1], slide_tags[s2]) for s1, s2 in slide_pairs}
+    y = model.addVars(slide_pairs, vtype=GRB.BINARY, name="y")
+ 
+    # Contrainte : une photo ne peut apparaître qu'une seule fois
+    for pid in photos:
+        model.addConstr(quicksum(x[s] for s in slides if pid in s) <= 1)
+ 
+    # Contrainte : une transition ne peut exister que si les deux diapositives sont sélectionnées
+    for s1, s2 in slide_pairs:
+        model.addConstr(y[s1, s2] <= x[s1])
+        model.addConstr(y[s1, s2] <= x[s2])
+ 
+    # Variables pour compter les types de slides sélectionnés
+    h_count = quicksum(x[s] for s in horizontal_slides)
+    v_count = quicksum(x[s] for s in vertical_slides)
+ 
+    # Assurer que le diaporama contient au moins un slide horizontal et un slide vertical si possible
+    if len(horizontal_slides) > 0:
+        model.addConstr(h_count >= 1, "At least one horizontal slide")
+    if len(vertical_slides) > 0:
+        model.addConstr(v_count >= 1, "At least one vertical slide")
+ 
+    # Objectif : maximiser la somme des scores de transition
+    model.setObjective(quicksum(transition_scores[s1, s2] * y[s1, s2] for s1, s2 in slide_pairs), GRB.MAXIMIZE)
+ 
+    # Exécuter l'optimisation
     model.optimize()
-    
-    # Extraire l'ordre des diapositives
-    order = []
-    used = set()
-    
-    for i in slide_indices:
-        for j in slide_indices:
-            if i != j and x[i, j].X > 0.5:
-                order.append((i, j))
-                used.add(i)
-                used.add(j)
-    
-    sorted_slides = []
-    
-    for idx in order:
-        if isinstance(slides[idx[0]][0], tuple):
-            sorted_slides.append(f"{slides[idx[0]][0][0]} {slides[idx[0]][0][1]}")
-        else:
-            sorted_slides.append(f"{slides[idx[0]][0]}")
-    
-    # Écriture du fichier de sortie
+ 
+    # Récupérer les slides sélectionnés
+    selected_slides = [s for s in slides if x[s].x > 0.5]
+ 
+    # Trouver le meilleur ordre pour maximiser le score
+    best_order = order_slides(selected_slides, transition_scores)
+ 
+    return best_order
+ 
+# ---- Ordonner les slides pour maximiser le score ----
+def order_slides(slides, transition_scores):
+    """ Trouve l'ordre des slides maximisant le score des transitions """
+    ordered_slides = []
+    remaining_slides = set(slides)
+ 
+    # Commencer avec un slide aléatoire
+    current_slide = remaining_slides.pop()
+    ordered_slides.append(current_slide)
+ 
+    while remaining_slides:
+        # Trouver le slide qui donne la meilleure transition avec le dernier ajouté
+        next_slide = max(remaining_slides, key=lambda s: transition_scores.get((current_slide, s), 0))
+        ordered_slides.append(next_slide)
+        remaining_slides.remove(next_slide)
+        current_slide = next_slide
+ 
+    return ordered_slides
+ 
+# ---- Calcul du score total ----
+def compute_total_score(slideshow, photos):
+    total_score = 0
+    for i in range(len(slideshow) - 1):
+        tags1 = set().union(*[photos[p]["tags"] for p in slideshow[i]])
+        tags2 = set().union(*[photos[p]["tags"] for p in slideshow[i + 1]])
+        total_score += interest_factor(tags1, tags2)
+    return total_score
+ 
+# ---- Sauvegarde de la solution ----
+def write_solution(slideshow):
     with open("slideshow.sol", "w") as f:
-        f.write(f"{len(sorted_slides)}\n")
-        f.write("\n".join(sorted_slides) + "\n")
-    
+        f.write(f"{len(slideshow)}\n")
+        for slide in slideshow:
+            f.write(" ".join(map(str, slide)) + "\n")
+ 
+# ---- Exécution principale ----
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python slideshow.py <dataset_path>")
+    if len(sys.argv) < 2:
+        print("Usage: python slideshow.py [dataset]")
         sys.exit(1)
-    
-    dataset_path = sys.argv[1]
-    solve_slideshow(dataset_path)
+ 
+    dataset = sys.argv[1]  # On prend uniquement le premier fichier donné
+    if not os.path.exists(dataset):
+        print(f"❌ Erreur : fichier '{dataset}' introuvable.")
+        sys.exit(1)
+ 
+    print(f"\n📂 Traitement du dataset : {dataset}")
+ 
+    photos, verticals = read_dataset(dataset)
+    slides = create_slides(photos, verticals)
+    solution = optimize_slideshow(photos, slides)
+    score_total = compute_total_score(solution, photos)
+ 
+    write_solution(solution)
+ 
+    print(f"✅ Solution optimale trouvée et sauvegardée dans 'slideshow.sol'")
+    print(f"🏆 Score total : {score_total}\n")

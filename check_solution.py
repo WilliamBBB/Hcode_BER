@@ -1,101 +1,136 @@
 import sys
+import os
+from gurobipy import Model, GRB, quicksum
+from itertools import combinations
 
-def read_input(file_path):
-    with open(file_path, 'r') as f:
-        lines = f.readlines()
+# ---- Lecture du fichier ----
+def charger_donnees(nom_fichier):
+    with open(nom_fichier, "r") as fichier:
+        lignes = fichier.readlines()
     
-    num_photos = int(lines[0].strip())
-    photos = []
-    
-    for i in range(1, num_photos + 1):
-        parts = lines[i].strip().split()
-        orientation = parts[0]
-        tags = set(parts[2:])
-        photos.append((i - 1, orientation, tags))
-    
-    return photos
+    nb_photos = int(lignes[0].strip())  # Nombre total de photos
+    images = {}
+    verticales = []
 
-def read_solution(file_path):
-    with open(file_path, 'r') as f:
-        lines = f.readlines()
-    
-    num_slides = int(lines[0].strip())
-    slides = []
-    
-    for i in range(1, num_slides + 1):
-        photo_indices = list(map(int, lines[i].strip().split()))
-        slides.append(photo_indices)
-    
-    return slides
+    for i in range(1, nb_photos + 1):
+        elements = lignes[i].strip().split()
+        type_orientation = elements[0]
+        etiquettes = set(elements[2:])
+        images[i - 1] = {"orientation": type_orientation, "tags": etiquettes}
+        if type_orientation == "V":
+            verticales.append(i - 1)
 
-def validate_solution(photos, slides):
-    used_photos = set()
-    
-    for slide in slides:
-        if len(slide) == 1:
-            photo_idx = slide[0]
-            if photos[photo_idx][1] != 'H':
-                print(f"Erreur : La photo {photo_idx} n'est pas horizontale.")
-                return False
-            if photo_idx in used_photos:
-                print(f"Erreur : La photo {photo_idx} est utilisée plus d'une fois.")
-                return False
-            used_photos.add(photo_idx)
-        elif len(slide) == 2:
-            photo_idx1, photo_idx2 = slide
-            if photos[photo_idx1][1] != 'V' or photos[photo_idx2][1] != 'V':
-                print(f"Erreur : Les photos {photo_idx1} et {photo_idx2} ne sont pas toutes les deux verticales.")
-                return False
-            if photo_idx1 in used_photos or photo_idx2 in used_photos:
-                print(f"Erreur : Les photos {photo_idx1} ou {photo_idx2} sont utilisées plus d'une fois.")
-                return False
-            used_photos.add(photo_idx1)
-            used_photos.add(photo_idx2)
-        else:
-            print(f"Erreur : La diapositive {slide} contient un nombre invalide de photos.")
-            return False
-    
-    if len(used_photos) != len(photos):
-        print("Erreur : Toutes les photos ne sont pas utilisées exactement une fois.")
-        return False
-    
-    return True
+    return images, verticales
 
-def compute_interest(tags1, tags2):
-    common_tags = len(tags1 & tags2)
-    unique_to_1 = len(tags1 - tags2)
-    unique_to_2 = len(tags2 - tags1)
-    return min(common_tags, unique_to_1, unique_to_2)
-
-def calculate_score(photos, slides):
-    total_score = 0
-    previous_tags = None
+# ---- Création des diapositives possibles ----
+def generer_diapositives(images, verticales):
+    diapos = []
     
-    for slide in slides:
-        current_tags = set()
-        for photo_idx in slide:
-            current_tags.update(photos[photo_idx][2])
-        
-        if previous_tags is not None:
-            total_score += compute_interest(previous_tags, current_tags)
-        
-        previous_tags = current_tags
+    for identifiant, image in images.items():
+        if image["orientation"] == "H":
+            diapos.append((identifiant,))
     
-    return total_score
+    paires_verticales = list(combinations(verticales, 2))
+    diapos.extend(paires_verticales)
+    
+    return diapos
 
+# ---- Calcul du facteur d'intérêt ----
+def calculer_interet(tags_un, tags_deux):
+    return min(len(tags_un & tags_deux), len(tags_un - tags_deux), len(tags_deux - tags_un))
+
+# ---- Optimisation avec Gurobi ----
+def optimiser_diaporama(images, diapos):
+    modele = Model("Optimisation Diaporama")
+    
+    print("\n🚀 Démarrage de l'optimisation Gurobi...")
+    
+    diapos_horizontales = [s for s in diapos if len(s) == 1]
+    diapos_verticales = [s for s in diapos if len(s) == 2]
+    
+    variables_selection = modele.addVars(diapos, vtype=GRB.BINARY, name="selection")
+    
+    etiquettes_diapos = {s: set().union(*[images[p]["tags"] for p in s]) for s in diapos}
+    paires_diapos = [(s1, s2) for s1 in diapos for s2 in diapos if s1 != s2]
+    scores_transitions = {(s1, s2): calculer_interet(etiquettes_diapos[s1], etiquettes_diapos[s2]) for s1, s2 in paires_diapos}
+    variables_transitions = modele.addVars(paires_diapos, vtype=GRB.BINARY, name="transition")
+    
+    for identifiant in images:
+        modele.addConstr(quicksum(variables_selection[s] for s in diapos if identifiant in s) <= 1)
+    
+    for s1, s2 in paires_diapos:
+        modele.addConstr(variables_transitions[s1, s2] <= variables_selection[s1])
+        modele.addConstr(variables_transitions[s1, s2] <= variables_selection[s2])
+    
+    nb_horizontales = quicksum(variables_selection[s] for s in diapos_horizontales)
+    nb_verticales = quicksum(variables_selection[s] for s in diapos_verticales)
+    
+    if len(diapos_horizontales) > 0:
+        modele.addConstr(nb_horizontales >= 1, "Au moins une diapositive horizontale")
+    if len(diapos_verticales) > 0:
+        modele.addConstr(nb_verticales >= 1, "Au moins une diapositive verticale")
+    
+    modele.setObjective(quicksum(scores_transitions[s1, s2] * variables_transitions[s1, s2] for s1, s2 in paires_diapos), GRB.MAXIMIZE)
+    
+    modele.optimize()
+    
+    diapos_selectionnees = [s for s in diapos if variables_selection[s].x > 0.5]
+    
+    ordre_optimise = ordonner_diapositives(diapos_selectionnees, scores_transitions)
+    
+    return ordre_optimise
+
+# ---- Ordonner les diapositives ----
+def ordonner_diapositives(diapos, scores_transitions):
+    ordre_final = []
+    diapos_restantes = set(diapos)
+    
+    diapo_actuelle = diapos_restantes.pop()
+    ordre_final.append(diapo_actuelle)
+    
+    while diapos_restantes:
+        prochaine_diapo = max(diapos_restantes, key=lambda s: scores_transitions.get((diapo_actuelle, s), 0))
+        ordre_final.append(prochaine_diapo)
+        diapos_restantes.remove(prochaine_diapo)
+        diapo_actuelle = prochaine_diapo
+    
+    return ordre_final
+
+# ---- Calcul du score total ----
+def evaluer_score_total(diaporama, images):
+    score = 0
+    for i in range(len(diaporama) - 1):
+        tags_premier = set().union(*[images[p]["tags"] for p in diaporama[i]])
+        tags_second = set().union(*[images[p]["tags"] for p in diaporama[i + 1]])
+        score += calculer_interet(tags_premier, tags_second)
+    return score
+
+# ---- Sauvegarde de la solution ----
+def sauvegarder_solution(diaporama):
+    with open("slideshow.sol", "w") as fichier:
+        fichier.write(f"{len(diaporama)}\n")
+        for diapo in diaporama:
+            fichier.write(" ".join(map(str, diapo)) + "\n")
+
+# ---- Exécution principale ----
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Utilisation : python check_solution.py <chemin_vers_le_fichier_données>")
+    if len(sys.argv) < 2:
+        print("Usage: python slideshow.py [fichier_donnees]")
         sys.exit(1)
     
-    data_file = sys.argv[1]
-    solution_file = "slideshow.sol"
+    fichier_donnees = sys.argv[1]
+    if not os.path.exists(fichier_donnees):
+        print(f"❌ Erreur : fichier '{fichier_donnees}' introuvable.")
+        sys.exit(1)
     
-    photos = read_input(data_file)
-    slides = read_solution(solution_file)
+    print(f"\n📂 Traitement du fichier : {fichier_donnees}")
     
-    if validate_solution(photos, slides):
-        score = calculate_score(photos, slides)
-        print(f"La solution est valide, score total du diaporama : {score}")
-    else:
-        print("La solution est invalide.")
+    images, verticales = charger_donnees(fichier_donnees)
+    diapos = generer_diapositives(images, verticales)
+    solution = optimiser_diaporama(images, diapos)
+    score_final = evaluer_score_total(solution, images)
+    
+    sauvegarder_solution(solution)
+    
+    print(f"Solution optimisée enregistrée dans 'slideshow.sol'")
+    print(f"Score final : {score_final}\n")
